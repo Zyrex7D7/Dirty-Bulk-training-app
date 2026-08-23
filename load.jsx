@@ -399,11 +399,10 @@ function Header({ totalWorkouts }) {
   return (
     <div className="flex items-end justify-between">
       <div className="flex items-center gap-4">
-        {/* LOGO ADICIONADO AQUI */}
-        <img src="/DirtyBulk.jpg" alt="DB Logo" className="w-14 h-14 rounded-xl" />
+        <img src="/DirtyBulk.jpg" alt="Dirty Bulk Logo" className="w-14 h-14 rounded-xl" />
         <div>
           <h1 className="font-display text-5xl leading-none" style={{ color: "var(--paper)" }}>
-            LOAD
+            DIRTY BULK
           </h1>
           <p className="font-mono text-xs mt-2 uppercase tracking-widest" style={{ color: "var(--paper-dim)" }}>
             your training log
