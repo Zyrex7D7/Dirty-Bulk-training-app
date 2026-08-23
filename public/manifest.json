@@ -2,12 +2,12 @@
   "short_name": "Dirty Bulk",
   "name": "Dirty Bulk",
   "icons": [
-    {
-      "src": "/DirtyBulk.jpg",
-      "sizes": "512x512",
-      "type": "image/jpeg"
-    }
-  ],
+  {
+    "src": "/DirtyBulk.jpg",
+    "sizes": "512x512",
+    "type": "image/jpeg"
+  }
+],
   "start_url": ".",
   "display": "standalone",
   "theme_color": "#1c1b19",
