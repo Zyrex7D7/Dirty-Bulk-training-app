@@ -10,6 +10,7 @@ import {
   Flame,
   Award,
   Check,
+  LogOut,
 } from "lucide-react";
 import {
   LineChart,
@@ -20,6 +21,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { supabase } from "./supabaseClient";
 
 // ---------- default data ----------
 
@@ -89,24 +91,53 @@ function bestMapFrom(sessions) {
   return map;
 }
 
-// ---------- storage ----------
+// ---------- supabase helpers ----------
+// Cada utilizador só recebe (via RLS) as suas próprias linhas, por isso não é
+// preciso filtrar por user_id manualmente nestas queries de leitura.
 
-async function getOrDefault(key, def) {
-  try {
-    const res = await window.storage.get(key, false);
-    if (res && res.value) return JSON.parse(res.value);
-    return def;
-  } catch (e) {
-    return def;
-  }
+function rowToSession(row) {
+  return { id: row.id, date: row.date, entries: row.entries || [] };
 }
 
-async function saveKey(key, value) {
-  try {
-    await window.storage.set(key, JSON.stringify(value), false);
-  } catch (e) {
-    console.error("Failed to save", key, e);
+function rowToBodyweight(row) {
+  return { id: row.id, date: row.date, weight: Number(row.weight) };
+}
+
+async function fetchExercises() {
+  const { data, error } = await supabase
+    .from("exercises")
+    .select("*")
+    .order("created_at", { ascending: true });
+  if (error) {
+    console.error("Failed to load exercises", error);
+    return DEFAULT_EXERCISES;
   }
+  const custom = (data || []).map((r) => ({ id: r.id, name: r.name, category: r.category }));
+  return [...DEFAULT_EXERCISES, ...custom];
+}
+
+async function fetchSessions() {
+  const { data, error } = await supabase
+    .from("sessions")
+    .select("*")
+    .order("date", { ascending: true });
+  if (error) {
+    console.error("Failed to load sessions", error);
+    return [];
+  }
+  return (data || []).map(rowToSession);
+}
+
+async function fetchBodyweight() {
+  const { data, error } = await supabase
+    .from("bodyweight")
+    .select("*")
+    .order("date", { ascending: true });
+  if (error) {
+    console.error("Failed to load bodyweight", error);
+    return [];
+  }
+  return (data || []).map(rowToBodyweight);
 }
 
 // ---------- global styles ----------
@@ -165,7 +196,7 @@ function GlobalStyle() {
         border-radius: 10px;
       }
 
-      input[type="text"], input[type="number"], input[type="date"], select {
+      input[type="text"], input[type="number"], input[type="date"], input[type="password"], input[type="email"], select {
         background: var(--ink);
         border: 1px solid rgba(242,238,227,0.18);
         color: var(--paper);
@@ -174,7 +205,7 @@ function GlobalStyle() {
         font-family: 'IBM Plex Mono', monospace;
         outline: none;
       }
-      input[type="text"] { font-family: 'Inter', sans-serif; }
+      input[type="text"], input[type="email"] { font-family: 'Inter', sans-serif; }
       select { font-family: 'Inter', sans-serif; }
       input:focus, select:focus {
         border-color: var(--stamp);
@@ -191,6 +222,7 @@ function GlobalStyle() {
       }
       .btn-primary:hover { background: #a83a26; }
       .btn-primary:active { transform: scale(0.97); }
+      .btn-primary:disabled { opacity: 0.6; }
 
       .nav-item {
         transition: color 0.15s ease, opacity 0.15s ease;
@@ -249,9 +281,140 @@ function EmptyState({ text }) {
   );
 }
 
-// ---------- app ----------
+// ---------- auth ----------
+
+function AuthScreen() {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [info, setInfo] = useState("");
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    setInfo("");
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) {
+      setError("Enter your email and password.");
+      return;
+    }
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    setLoading(true);
+    if (mode === "signup") {
+      const { error } = await supabase.auth.signUp({ email: cleanEmail, password });
+      setLoading(false);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      // Se a confirmação de email estiver desativada no Supabase, isto já faz login.
+      setInfo("Account created. If you're not logged in automatically, log in below.");
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
+      setLoading(false);
+      if (error) setError(error.message);
+    }
+  }
+
+  return (
+    <div className="carga-root">
+      <GlobalStyle />
+      <div className="max-w-sm mx-auto px-4 pt-20 flex flex-col gap-6">
+        <div className="flex flex-col items-center gap-3">
+          <img src="/DirtyBulk.jpg" alt="Dirty Bulk Logo" className="w-16 h-16 rounded-xl" />
+          <h1 className="font-display text-4xl" style={{ color: "var(--paper)" }}>DIRTY BULK</h1>
+          <p className="font-mono text-xs uppercase tracking-widest" style={{ color: "var(--paper-dim)" }}>
+            your training log
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="card p-5 flex flex-col gap-3">
+          <h2 className="font-display text-lg" style={{ color: "var(--paper)" }}>
+            {mode === "signup" ? "CREATE ACCOUNT" : "LOG IN"}
+          </h2>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-mono uppercase" style={{ color: "var(--paper-dim)" }}>Email</label>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="username"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-mono uppercase" style={{ color: "var(--paper-dim)" }}>Password</label>
+            <input
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+            />
+          </div>
+
+          {error && <p className="text-sm" style={{ color: "var(--stamp)" }}>{error}</p>}
+          {info && <p className="text-sm" style={{ color: "var(--brass)" }}>{info}</p>}
+
+          <button type="submit" disabled={loading} className="btn-primary py-3 text-sm mt-1">
+            {loading ? "Please wait…" : mode === "signup" ? "Sign up" : "Log in"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMode(mode === "signup" ? "login" : "signup");
+              setError("");
+              setInfo("");
+            }}
+            className="text-xs font-mono underline text-center"
+            style={{ color: "var(--paper-dim)" }}
+          >
+            {mode === "signup" ? "Already have an account? Log in" : "No account yet? Sign up"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------- app (root: decides between auth screen and the app itself) ----------
 
 export default function App() {
+  const [session, setSession] = useState(undefined); // undefined = a carregar, null = sem sessão
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return (
+      <div className="carga-root flex items-center justify-center" style={{ minHeight: "100vh" }}>
+        <GlobalStyle />
+        <p className="font-mono text-sm" style={{ color: "var(--paper-dim)" }}>Loading…</p>
+      </div>
+    );
+  }
+
+  if (!session) return <AuthScreen />;
+
+  return <AppShell key={session.user.id} userId={session.user.id} />;
+}
+
+// ---------- app shell (authenticated app) ----------
+
+function AppShell({ userId }) {
   const [loaded, setLoaded] = useState(false);
   const [exercises, setExercises] = useState(DEFAULT_EXERCISES);
   const [sessions, setSessions] = useState([]);
@@ -259,20 +422,23 @@ export default function App() {
   const [view, setView] = useState("dashboard");
 
   useEffect(() => {
+    let active = true;
     (async () => {
-      const ex = await getOrDefault("load:exercises", DEFAULT_EXERCISES);
-      const sess = await getOrDefault("load:sessions", []);
-      const bw = await getOrDefault("load:bodyweight", []);
+      const [ex, sess, bw] = await Promise.all([
+        fetchExercises(),
+        fetchSessions(),
+        fetchBodyweight(),
+      ]);
+      if (!active) return;
       setExercises(ex);
       setSessions(sess);
       setBodyweight(bw);
       setLoaded(true);
     })();
-  }, []);
-
-  useEffect(() => { if (loaded) saveKey("load:exercises", exercises); }, [exercises, loaded]);
-  useEffect(() => { if (loaded) saveKey("load:sessions", sessions); }, [sessions, loaded]);
-  useEffect(() => { if (loaded) saveKey("load:bodyweight", bodyweight); }, [bodyweight, loaded]);
+    return () => {
+      active = false;
+    };
+  }, [userId]);
 
   // ----- stats -----
 
@@ -334,25 +500,82 @@ export default function App() {
     [sessions]
   );
 
-  function handleDeleteSession(id) {
+  async function handleDeleteSession(id) {
     setSessions((prev) => prev.filter((s) => s.id !== id));
+    const { error } = await supabase.from("sessions").delete().eq("id", id);
+    if (error) console.error("Failed to delete session", error);
   }
 
-  function handleDeleteBodyweight(id) {
+  async function handleDeleteBodyweight(id) {
     setBodyweight((prev) => prev.filter((b) => b.id !== id));
+    const { error } = await supabase.from("bodyweight").delete().eq("id", id);
+    if (error) console.error("Failed to delete bodyweight entry", error);
   }
 
-  function handleAddExercise(name, category) {
-    const ex = { id: uid(), name: name.trim(), category };
+  async function handleAddExercise(name, category) {
+    const trimmed = name.trim();
+    const { data, error } = await supabase
+      .from("exercises")
+      .insert({ user_id: userId, name: trimmed, category })
+      .select()
+      .single();
+    if (error) {
+      console.error("Failed to add exercise", error);
+      const fallback = { id: uid(), name: trimmed, category };
+      setExercises((prev) => [...prev, fallback]);
+      return fallback;
+    }
+    const ex = { id: data.id, name: data.name, category: data.category };
     setExercises((prev) => [...prev, ex]);
     return ex;
+  }
+
+  async function handleAddSession(newSession) {
+    const { data, error } = await supabase
+      .from("sessions")
+      .insert({ user_id: userId, date: newSession.date, entries: newSession.entries })
+      .select()
+      .single();
+    if (error) {
+      console.error("Failed to save session", error);
+      setSessions((prev) => [...prev, newSession]);
+      return;
+    }
+    setSessions((prev) => [...prev, rowToSession(data)]);
+  }
+
+  async function handleAddBodyweight(entry) {
+    const { data, error } = await supabase
+      .from("bodyweight")
+      .upsert({ user_id: userId, date: entry.date, weight: entry.weight }, { onConflict: "user_id,date" })
+      .select()
+      .single();
+    if (error) {
+      console.error("Failed to save bodyweight", error);
+      setBodyweight((prev) => [...prev.filter((b) => b.date !== entry.date), entry]);
+      return;
+    }
+    setBodyweight((prev) => [...prev.filter((b) => b.date !== entry.date), rowToBodyweight(data)]);
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+  }
+
+  if (!loaded) {
+    return (
+      <div className="carga-root flex items-center justify-center" style={{ minHeight: "100vh" }}>
+        <GlobalStyle />
+        <p className="font-mono text-sm" style={{ color: "var(--paper-dim)" }}>Loading your data…</p>
+      </div>
+    );
   }
 
   return (
     <div className="carga-root">
       <GlobalStyle />
       <div className="max-w-3xl mx-auto px-4 pt-8 pb-28 md:pb-10">
-        <Header totalWorkouts={totalWorkouts} />
+        <Header totalWorkouts={totalWorkouts} onLogout={handleLogout} />
 
         <div className="mt-6">
           {view === "dashboard" && (
@@ -371,7 +594,7 @@ export default function App() {
             <LogWorkout
               exercises={exercises}
               sessions={sessions}
-              setSessions={setSessions}
+              onAddSession={handleAddSession}
               onAddExercise={handleAddExercise}
             />
           )}
@@ -381,7 +604,7 @@ export default function App() {
           {view === "bodyweight" && (
             <Bodyweight
               bodyweight={bodyweight}
-              setBodyweight={setBodyweight}
+              onAdd={handleAddBodyweight}
               onDelete={handleDeleteBodyweight}
             />
           )}
@@ -395,7 +618,7 @@ export default function App() {
 
 // ---------- header ----------
 
-function Header({ totalWorkouts }) {
+function Header({ totalWorkouts, onLogout }) {
   return (
     <div className="flex items-end justify-between">
       <div className="flex items-center gap-4">
@@ -409,18 +632,28 @@ function Header({ totalWorkouts }) {
           </p>
         </div>
       </div>
-      <div
-        className="hidden sm:flex flex-col items-center justify-center rounded-full font-mono flex-shrink-0"
-        style={{
-          width: 56,
-          height: 56,
-          border: "1px solid var(--brass)",
-          color: "var(--brass)",
-        }}
-        title="Total workouts logged"
-      >
-        <span className="text-lg font-semibold leading-none">{totalWorkouts}</span>
-        <span style={{ fontSize: 8 }}>SESSIONS</span>
+      <div className="flex items-center gap-3 flex-shrink-0">
+        <div
+          className="hidden sm:flex flex-col items-center justify-center rounded-full font-mono flex-shrink-0"
+          style={{
+            width: 56,
+            height: 56,
+            border: "1px solid var(--brass)",
+            color: "var(--brass)",
+          }}
+          title="Total workouts logged"
+        >
+          <span className="text-lg font-semibold leading-none">{totalWorkouts}</span>
+          <span style={{ fontSize: 8 }}>SESSIONS</span>
+        </div>
+        <button
+          onClick={onLogout}
+          title="Log out"
+          className="p-2"
+          style={{ color: "var(--paper-dim)" }}
+        >
+          <LogOut size={18} />
+        </button>
       </div>
     </div>
   );
@@ -541,7 +774,7 @@ function Dashboard({
 
 // ---------- log workout ----------
 
-function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
+function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
   const [date, setDate] = useState(todayISO());
   const [entries, setEntries] = useState([]);
   const [pickerValue, setPickerValue] = useState("");
@@ -551,6 +784,7 @@ function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
   const [error, setError] = useState("");
   const [prModal, setPrModal] = useState(null);
   const [toast, setToast] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!toast) return;
@@ -583,9 +817,9 @@ function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
     setPickerValue("");
   }
 
-  function handleCreateExercise() {
+  async function handleCreateExercise() {
     if (!newName.trim()) return;
-    const ex = onAddExercise(newName, newCategory);
+    const ex = await onAddExercise(newName, newCategory);
     addExerciseToSession(ex.id);
     setNewName("");
     setNewCategory(CATEGORIES[0]);
@@ -618,7 +852,7 @@ function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
     setEntries((prev) => prev.filter((e) => e.id !== entryId));
   }
 
-  function handleSave() {
+  async function handleSave() {
     setError("");
     const cleanEntries = entries
       .map((e) => ({
@@ -644,7 +878,9 @@ function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
     }
 
     const newSession = { id: uid(), date, entries: cleanEntries };
-    setSessions((prev) => [...prev, newSession]);
+    setSaving(true);
+    await onAddSession(newSession);
+    setSaving(false);
     setEntries([]);
 
     if (prs.length > 0) {
@@ -766,8 +1002,8 @@ function LogWorkout({ exercises, sessions, setSessions, onAddExercise }) {
         <p className="text-sm" style={{ color: "var(--stamp)" }}>{error}</p>
       )}
 
-      <button onClick={handleSave} className="btn-primary py-3 text-sm">
-        Save workout
+      <button onClick={handleSave} disabled={saving} className="btn-primary py-3 text-sm">
+        {saving ? "Saving…" : "Save workout"}
       </button>
 
       {toast && (
@@ -893,24 +1129,24 @@ function Progress({ exercises, sessions }) {
 
 // ---------- bodyweight ----------
 
-function Bodyweight({ bodyweight, setBodyweight, onDelete }) {
+function Bodyweight({ bodyweight, onAdd, onDelete }) {
   const [date, setDate] = useState(todayISO());
   const [weight, setWeight] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const sorted = useMemo(() => [...bodyweight].sort((a, b) => a.date.localeCompare(b.date)), [bodyweight]);
   const chartData = sorted.map((b) => ({ ...b, dateLabel: fmtDateShort(b.date) }));
 
-  function handleAdd() {
+  async function handleAdd() {
     if (!Number(weight) || Number(weight) <= 0) {
       setError("Enter a valid weight.");
       return;
     }
     setError("");
-    setBodyweight((prev) => {
-      const withoutSameDate = prev.filter((b) => b.date !== date);
-      return [...withoutSameDate, { id: uid(), date, weight: Number(weight) }];
-    });
+    setSaving(true);
+    await onAdd({ date, weight: Number(weight) });
+    setSaving(false);
     setWeight("");
   }
 
@@ -927,7 +1163,9 @@ function Bodyweight({ bodyweight, setBodyweight, onDelete }) {
           <label className="text-xs font-mono uppercase" style={{ color: "var(--paper-dim)" }}>Weight (kg)</label>
           <input type="number" placeholder="0.0" value={weight} onChange={(e) => setWeight(e.target.value)} className="w-24" />
         </div>
-        <button onClick={handleAdd} className="btn-primary py-2 px-4 text-sm">Log</button>
+        <button onClick={handleAdd} disabled={saving} className="btn-primary py-2 px-4 text-sm">
+          {saving ? "Saving…" : "Log"}
+        </button>
       </div>
       {error && <p className="text-sm" style={{ color: "var(--stamp)" }}>{error}</p>}
 
