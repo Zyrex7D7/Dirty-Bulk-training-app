@@ -11,6 +11,7 @@ import {
   Award,
   Check,
   LogOut,
+  Pencil,
 } from "lucide-react";
 import {
   LineChart,
@@ -89,6 +90,66 @@ function bestMapFrom(sessions) {
     }
   }
   return map;
+}
+
+// Sugestão simples de progressão: olha para a sessão mais recente em que este
+// exercício apareceu e sugere o peso do último set feito, mais um pequeno
+// incremento se todos os sets dessa sessão bateram o alvo de reps (>= 8).
+function suggestWeightFor(sessions, exerciseId) {
+  const relevant = [...sessions]
+    .filter((s) => s.entries.some((e) => e.exerciseId === exerciseId))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  if (relevant.length === 0) return null;
+
+  const lastSession = relevant[0];
+  const entry = lastSession.entries.find((e) => e.exerciseId === exerciseId);
+  if (!entry || entry.sets.length === 0) return null;
+
+  const lastSet = entry.sets[entry.sets.length - 1];
+  const lastWeight = Number(lastSet.weight);
+  if (!lastWeight) return null;
+
+  const allSetsHitTarget = entry.sets.every((st) => Number(st.reps) >= 8);
+  const suggested = allSetsHitTarget ? Math.round((lastWeight + 2.5) * 2) / 2 : lastWeight;
+
+  return { weight: suggested, reps: Number(lastSet.reps) || "", basedOnDate: lastSession.date };
+}
+
+// ---------- rascunho local do treino em curso ----------
+// Guarda-se no localStorage do telemóvel/browser (não no Supabase) para o
+// treino não se perder se a pessoa mudar de app antes de gravar.
+// Usa uma chave diferente para "novo treino" e para cada treino em edição,
+// para não misturar rascunhos entre eles.
+const DRAFT_KEY_PREFIX = "dirtybulk_draft_workout_";
+
+function draftKeyFor(sessionId) {
+  return DRAFT_KEY_PREFIX + (sessionId || "new");
+}
+
+function loadDraft(sessionId) {
+  try {
+    const raw = localStorage.getItem(draftKeyFor(sessionId));
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveDraft(sessionId, draft) {
+  try {
+    localStorage.setItem(draftKeyFor(sessionId), JSON.stringify(draft));
+  } catch {
+    // localStorage indisponível (modo privado, etc.) — ignora silenciosamente
+  }
+}
+
+function clearDraft(sessionId) {
+  try {
+    localStorage.removeItem(draftKeyFor(sessionId));
+  } catch {
+    // ignora
+  }
 }
 
 // ---------- supabase helpers ----------
@@ -420,6 +481,7 @@ function AppShell({ userId }) {
   const [sessions, setSessions] = useState([]);
   const [bodyweight, setBodyweight] = useState([]);
   const [view, setView] = useState("dashboard");
+  const [editingSession, setEditingSession] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -544,6 +606,35 @@ function AppShell({ userId }) {
     setSessions((prev) => [...prev, rowToSession(data)]);
   }
 
+  async function handleUpdateSession(id, patch) {
+    const { data, error } = await supabase
+      .from("sessions")
+      .update({ date: patch.date, entries: patch.entries })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) {
+      console.error("Failed to update session", error);
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      return;
+    }
+    setSessions((prev) => prev.map((s) => (s.id === id ? rowToSession(data) : s)));
+  }
+
+  function handleStartEditSession(session) {
+    setEditingSession(session);
+    setView("log");
+  }
+
+  function handleGoToLog() {
+    setEditingSession(null);
+    setView("log");
+  }
+
+  function handleDoneEditing() {
+    setEditingSession(null);
+  }
+
   async function handleAddBodyweight(entry) {
     const { data, error } = await supabase
       .from("bodyweight")
@@ -588,6 +679,7 @@ function AppShell({ userId }) {
               recentSessions={recentSessions}
               exercises={exercises}
               onDeleteSession={handleDeleteSession}
+              onEditSession={handleStartEditSession}
             />
           )}
           {view === "log" && (
@@ -595,7 +687,10 @@ function AppShell({ userId }) {
               exercises={exercises}
               sessions={sessions}
               onAddSession={handleAddSession}
+              onUpdateSession={handleUpdateSession}
               onAddExercise={handleAddExercise}
+              editingSession={editingSession}
+              onDoneEditing={handleDoneEditing}
             />
           )}
           {view === "progress" && (
@@ -611,7 +706,17 @@ function AppShell({ userId }) {
         </div>
       </div>
 
-      <BottomNav view={view} setView={setView} />
+      <BottomNav
+        view={view}
+        setView={(id) => {
+          if (id === "log") {
+            handleGoToLog();
+          } else {
+            setEditingSession(null);
+            setView(id);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -701,6 +806,7 @@ function Dashboard({
   recentSessions,
   exercises,
   onDeleteSession,
+  onEditSession,
 }) {
   return (
     <div className="flex flex-col gap-6">
@@ -759,9 +865,14 @@ function Dashboard({
                       })}
                     </div>
                   </div>
-                  <button onClick={() => onDeleteSession(s.id)} aria-label="Delete workout" style={{ color: "var(--paper-dim)" }}>
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => onEditSession(s)} aria-label="Edit workout" style={{ color: "var(--paper-dim)" }}>
+                      <Pencil size={16} />
+                    </button>
+                    <button onClick={() => onDeleteSession(s.id)} aria-label="Delete workout" style={{ color: "var(--paper-dim)" }}>
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -774,9 +885,11 @@ function Dashboard({
 
 // ---------- log workout ----------
 
-function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
-  const [date, setDate] = useState(todayISO());
-  const [entries, setEntries] = useState([]);
+function LogWorkout({ exercises, sessions, onAddSession, onUpdateSession, onAddExercise, editingSession, onDoneEditing }) {
+  const isEditing = !!editingSession;
+  const draft = useMemo(() => loadDraft(editingSession?.id), [editingSession?.id]);
+  const [date, setDate] = useState(draft?.date || editingSession?.date || todayISO());
+  const [entries, setEntries] = useState(draft?.entries || editingSession?.entries || []);
   const [pickerValue, setPickerValue] = useState("");
   const [showNewExercise, setShowNewExercise] = useState(false);
   const [newName, setNewName] = useState("");
@@ -786,23 +899,62 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
   const [toast, setToast] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Ao entrar em modo de edição de um treino diferente, recarrega o rascunho
+  // (ou o próprio treino) correspondente a essa sessão específica.
+  useEffect(() => {
+    const d = loadDraft(editingSession?.id);
+    setDate(d?.date || editingSession?.date || todayISO());
+    setEntries(d?.entries || editingSession?.entries || []);
+    setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingSession?.id]);
+
+  // Não inclui as sets do próprio treino em edição no cálculo de sugestões/PRs,
+  // para não sugerir com base nele mesmo.
+  const historySessions = useMemo(
+    () => (isEditing ? sessions.filter((s) => s.id !== editingSession.id) : sessions),
+    [sessions, isEditing, editingSession?.id]
+  );
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(""), 2500);
     return () => clearTimeout(t);
   }, [toast]);
 
+  // Guarda o rascunho sempre que o treino em curso muda, para sobreviver a
+  // trocar de app, dar refresh ou fechar o browser no telemóvel antes de gravar.
+  useEffect(() => {
+    if (entries.length === 0) {
+      clearDraft(editingSession?.id);
+    } else {
+      saveDraft(editingSession?.id, { date, entries });
+    }
+  }, [date, entries, editingSession?.id]);
+
   function addExerciseToSession(exerciseId) {
     setEntries((prev) => {
       const existing = prev.find((e) => e.exerciseId === exerciseId);
       if (existing) {
+        // Já há sets deste exercício nesta sessão: usa o peso/reps do último set feito agora.
+        const lastSet = existing.sets[existing.sets.length - 1];
+        const prefill = {
+          id: uid(),
+          weight: lastSet ? lastSet.weight : "",
+          reps: lastSet ? lastSet.reps : "",
+        };
         return prev.map((e) =>
-          e.exerciseId === exerciseId
-            ? { ...e, sets: [...e.sets, { id: uid(), weight: "", reps: "" }] }
-            : e
+          e.exerciseId === exerciseId ? { ...e, sets: [...e.sets, prefill] } : e
         );
       }
-      return [...prev, { id: uid(), exerciseId, sets: [{ id: uid(), weight: "", reps: "" }] }];
+      // Primeiro set deste exercício nesta sessão: sugere com base no histórico.
+      const suggestion = suggestWeightFor(historySessions, exerciseId);
+      const firstSet = {
+        id: uid(),
+        weight: suggestion ? String(suggestion.weight) : "",
+        reps: suggestion ? String(suggestion.reps) : "",
+      };
+      return [...prev, { id: uid(), exerciseId, sets: [firstSet] }];
     });
   }
 
@@ -838,7 +990,16 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
 
   function addSet(entryId) {
     setEntries((prev) =>
-      prev.map((e) => (e.id === entryId ? { ...e, sets: [...e.sets, { id: uid(), weight: "", reps: "" }] } : e))
+      prev.map((e) => {
+        if (e.id !== entryId) return e;
+        const lastSet = e.sets[e.sets.length - 1];
+        const prefill = {
+          id: uid(),
+          weight: lastSet ? lastSet.weight : "",
+          reps: lastSet ? lastSet.reps : "",
+        };
+        return { ...e, sets: [...e.sets, prefill] };
+      })
     );
   }
 
@@ -866,7 +1027,7 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
       return;
     }
 
-    const priorBest = bestMapFrom(sessions);
+    const priorBest = bestMapFrom(historySessions);
     const prs = [];
     for (const e of cleanEntries) {
       const maxSet = e.sets.reduce((m, st) => (Number(st.weight) > Number(m.weight) ? st : m), e.sets[0]);
@@ -877,22 +1038,52 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
       }
     }
 
-    const newSession = { id: uid(), date, entries: cleanEntries };
     setSaving(true);
-    await onAddSession(newSession);
-    setSaving(false);
-    setEntries([]);
-
-    if (prs.length > 0) {
-      setPrModal(prs);
+    if (isEditing) {
+      await onUpdateSession(editingSession.id, { date, entries: cleanEntries });
     } else {
-      setToast("Workout saved!");
+      const newSession = { id: uid(), date, entries: cleanEntries };
+      await onAddSession(newSession);
     }
+    setSaving(false);
+    clearDraft(editingSession?.id);
+
+    if (isEditing) {
+      setToast("Workout updated!");
+      onDoneEditing();
+    } else {
+      setEntries([]);
+      if (prs.length > 0) {
+        setPrModal(prs);
+      } else {
+        setToast("Workout saved!");
+      }
+    }
+  }
+
+  function handleCancelEdit() {
+    clearDraft(editingSession?.id);
+    onDoneEditing();
   }
 
   return (
     <div className="flex flex-col gap-5">
-      <h2 className="font-display text-xl" style={{ color: "var(--paper)" }}>LOG WORKOUT</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="font-display text-xl" style={{ color: "var(--paper)" }}>
+          {isEditing ? "EDIT WORKOUT" : "LOG WORKOUT"}
+        </h2>
+        {isEditing && (
+          <button onClick={handleCancelEdit} className="text-xs font-mono underline" style={{ color: "var(--paper-dim)" }}>
+            Cancel edit
+          </button>
+        )}
+      </div>
+
+      {isEditing && (
+        <div className="card p-3 text-xs font-mono" style={{ borderColor: "var(--cobalt)", color: "var(--cobalt)" }}>
+          Editing the workout from {fmtDate(editingSession.date)}. You can add sets or exercises and save your changes.
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <label className="text-xs font-mono uppercase" style={{ color: "var(--paper-dim)" }}>Date</label>
@@ -948,9 +1139,10 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
         <div className="flex flex-col gap-4">
           {entries.map((entry) => {
             const ex = exercises.find((x) => x.id === entry.exerciseId);
+            const suggestion = suggestWeightFor(historySessions, entry.exerciseId);
             return (
               <div key={entry.id} className="card p-4">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{ex ? ex.name : "Exercise"}</span>
                     {ex && <CategoryTag category={ex.category} />}
@@ -959,6 +1151,11 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
                     <Trash2 size={16} />
                   </button>
                 </div>
+                {suggestion && (
+                  <p className="text-xs font-mono mb-2" style={{ color: "var(--brass)" }}>
+                    Suggested: {suggestion.weight}kg (last on {fmtDateShort(suggestion.basedOnDate)})
+                  </p>
+                )}
                 <div className="flex flex-col gap-2">
                   {entry.sets.map((st, i) => (
                     <div key={st.id} className="flex items-center gap-2">
@@ -1003,7 +1200,7 @@ function LogWorkout({ exercises, sessions, onAddSession, onAddExercise }) {
       )}
 
       <button onClick={handleSave} disabled={saving} className="btn-primary py-3 text-sm">
-        {saving ? "Saving…" : "Save workout"}
+        {saving ? "Saving…" : isEditing ? "Save changes" : "Save workout"}
       </button>
 
       {toast && (
